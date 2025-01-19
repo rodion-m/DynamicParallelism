@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace DynamicParallelism.Tests;
 
 public sealed class DynamicConcurrencyLimiterTests
@@ -174,15 +176,15 @@ public sealed class DynamicConcurrencyLimiterTests
         var rand = new Random();
 
         // Keep track of how many are concurrently in use
-        int currentInUse = 0;
-        int maxObserved = 0;
+        var currentInUse = 0;
+        var maxObserved = 0;
 
         // We'll run multiple tasks that each repeatedly acquire, do a tiny amount of work, release.
         // In parallel, we occasionally update concurrency up or down.
         var tasks = new List<Task>();
 
         // Worker tasks
-        for (int i = 0; i < 10; i++)
+        for (var i = 0; i < 10; i++)
         {
             tasks.Add(Task.Run(async () =>
             {
@@ -190,8 +192,8 @@ public sealed class DynamicConcurrencyLimiterTests
                 {
                     using (await limiter.AcquireAsync(cts.Token))
                     {
-                        int used = Interlocked.Increment(ref currentInUse);
-                        int observed = InterlockedExtensions.Max(ref maxObserved, used);
+                        var used = Interlocked.Increment(ref currentInUse);
+                        var observed = InterlockedExtensions.Max(ref maxObserved, used);
 
                         // Simulate work
                         await Task.Delay(rand.Next(1, 10), cts.Token);
@@ -206,7 +208,7 @@ public sealed class DynamicConcurrencyLimiterTests
         {
             while (!cts.IsCancellationRequested)
             {
-                int newConcurrency = rand.Next(1, 10);
+                var newConcurrency = rand.Next(1, 10);
                 limiter.UpdateMaxConcurrency(newConcurrency);
                 await Task.Delay(rand.Next(1, 15), cts.Token);
             }
@@ -232,6 +234,63 @@ public sealed class DynamicConcurrencyLimiterTests
         // We can at least assert that we never drastically exceeded 10.
         Assert.True(maxObserved <= 10, $"Max observed concurrency = {maxObserved} which exceeds 10");
     }
+    
+    
+    /// <summary>
+    /// This test is a stress test of correctness and thread-safety of the limiter.
+    /// It's an emulation of real hard-to-reproduce concurrency issues.
+    /// </summary>
+    [Fact]
+    public async Task There_are_no_deadlocks_and_all_items_are_processed_once()
+    {
+        // Test parameters
+        var initialConcurrency = 100;
+        var (minConcurrency, maxConcurrency) = (1, 10_000);
+        var itemsCount = 1_000_000;
+
+        var items = Enumerable.Range(0, itemsCount);
+        using DynamicConcurrencyLimiter limiter = new(initialConcurrency);
+
+        // Track processed items and their processing count
+        ConcurrentDictionary<int, int> processedItems = new();
+
+        // Create a random number generator for concurrency updates
+        Random random = new(42); // Fixed seed for reproducibility
+        var updateInterval = 1000; // Update concurrency every N items
+        var processedCount = 0;
+
+        // Process items with random concurrency updates
+        await DynamicParallel.ForEachAsync(items, limiter, async (item, _) =>
+        {
+            // Simulate some minimal work
+            await Task.Yield();
+
+            // Track item processing
+            processedItems.AddOrUpdate(
+                item,
+                1, // Initial value if key doesn't exist
+                (_, count) => count + 1 // Increment existing count
+            );
+
+            // Periodically update concurrency limit
+            if (Interlocked.Increment(ref processedCount) % updateInterval == 0)
+            {
+                var newConcurrency = random.Next(minConcurrency, maxConcurrency + 1);
+                limiter.UpdateMaxConcurrency(newConcurrency);
+            }
+        });
+
+        // Verify results
+        Assert.Equal(itemsCount, Volatile.Read(ref processedCount));
+        Assert.Equal(itemsCount, processedItems.Count);
+
+        // Verify each item was processed exactly once
+        foreach (var kvp in processedItems)
+        {
+            Assert.Equal(1, kvp.Value);
+            Assert.InRange(kvp.Key, 0, itemsCount - 1);
+        }
+    }
 }
 
 // Utility extension for atomic "Max" operation
@@ -239,11 +298,11 @@ internal static class InterlockedExtensions
 {
     public static int Max(ref int target, int value)
     {
-        int current = target;
+        var current = target;
         while (true)
         {
-            int initial = current;
-            int newValue = Math.Max(initial, value);
+            var initial = current;
+            var newValue = Math.Max(initial, value);
             current = Interlocked.CompareExchange(ref target, newValue, initial);
             if (current == initial)
             {
